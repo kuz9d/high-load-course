@@ -40,11 +40,11 @@ class NonBlockingOngoingWindow(
 
 
     sealed class WindowResponse(val currentWinSize: Int) {
-        public class Success(
+        class Success(
             currentWinSize: Int
         ) : WindowResponse(currentWinSize)
 
-        public class Fail(
+        class Fail(
             currentWinSize: Int
         ) : WindowResponse(currentWinSize)
     }

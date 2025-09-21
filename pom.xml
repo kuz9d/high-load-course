@@ -1,6 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent>
         <groupId>org.springframework.boot</groupId>
@@ -8,14 +6,12 @@
         <version>3.5.0</version>
         <relativePath/>
     </parent>
-
     <groupId>ru.quipy</groupId>
     <artifactId>demo</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>OnlineShop</name>
     <description>Application for resilience and highly-loaded applications course</description>
-
-	<properties>
+    <properties>
         <kotlin.version>2.2.0</kotlin.version>
         <kotlinx-coroutines-core.version>1.9.0</kotlinx-coroutines-core.version>
         <okhttp.version>4.12.0</okhttp.version>
@@ -24,8 +20,7 @@
         <json-datatype.version>2.9.8</json-datatype.version>
         <caffeine.version>3.1.8</caffeine.version>
     </properties>
-
-	<dependencies>
+    <dependencies>
         <dependency>
             <groupId>io.github.resilience4j</groupId>
             <artifactId>resilience4j-ratelimiter</artifactId>
@@ -55,73 +50,60 @@
                 </exclusion>
             </exclusions>
         </dependency>
-
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jetty</artifactId>
         </dependency>
-
         <dependency>
             <groupId>org.eclipse.jetty.http2</groupId>
             <artifactId>jetty-http2-server</artifactId>
             <version>${jetty.version}</version>
         </dependency>
-
-<!--        <dependency>-->
-<!--            <groupId>org.eclipse.jetty</groupId>-->
-<!--            <artifactId>jetty-alpn-server</artifactId>-->
-<!--        </dependency>-->
-
-<!--        <dependency>-->
-<!--            <groupId>org.eclipse.jetty</groupId>-->
-<!--            <artifactId>jetty-alpn-conscrypt-server</artifactId>-->
-<!--        </dependency>-->
-
+        <!--         <dependency> -->
+        <!--             <groupId>org.eclipse.jetty</groupId> -->
+        <!--             <artifactId>jetty-alpn-server</artifactId> -->
+        <!--         </dependency> -->
+        <!--         <dependency> -->
+        <!--             <groupId>org.eclipse.jetty</groupId> -->
+        <!--             <artifactId>jetty-alpn-conscrypt-server</artifactId> -->
+        <!--         </dependency> -->
         <dependency>
             <groupId>com.fasterxml.jackson.module</groupId>
             <artifactId>jackson-module-kotlin</artifactId>
         </dependency>
-
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId>
             <artifactId>jackson-datatype-jsr310</artifactId>
             <version>${json-datatype.version}</version>
         </dependency>
-
         <dependency>
             <groupId>com.github.ben-manes.caffeine</groupId>
             <artifactId>caffeine</artifactId>
             <version>${caffeine.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.jetbrains.kotlin</groupId>
             <artifactId>kotlin-reflect</artifactId>
         </dependency>
-
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
-
         <dependency>
             <groupId>ru.quipy</groupId>
             <artifactId>tiny-event-sourcing-spring-boot-starter</artifactId>
             <version>${tiny.es.version}</version>
         </dependency>
-
         <dependency>
             <groupId>ru.quipy</groupId>
             <artifactId>tiny-postgres-event-store-spring-boot-starter</artifactId>
             <version>${tiny.es.version}</version>
         </dependency>
-
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
-
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
@@ -133,7 +115,6 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-
     <build>
         <sourceDirectory>${project.basedir}/src/main/kotlin</sourceDirectory>
         <testSourceDirectory>src/test/kotlin</testSourceDirectory>
@@ -219,5 +200,4 @@
             </plugin>
         </plugins>
     </build>
-
 </project>

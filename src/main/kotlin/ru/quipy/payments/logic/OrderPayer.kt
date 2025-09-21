@@ -1,5 +1,9 @@
 package ru.quipy.payments.logic
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -20,6 +24,8 @@ class OrderPayer {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
     }
 
+    private val paymentScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
@@ -36,20 +42,23 @@ class OrderPayer {
         CallerBlockingRejectedExecutionHandler()
     )
 
-    fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+    suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
-        paymentExecutor.submit {
-            val createdEvent = paymentESService.create {
-                it.create(
-                    paymentId,
-                    orderId,
-                    amount
-                )
-            }
-            logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
 
-            paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
+        paymentScope.launch {
+            try {
+                val createdEvent = paymentESService.create {
+                    it.create(paymentId, orderId, amount)
+                }
+                logger.trace("Payment ${createdEvent.paymentId} created.")
+
+                paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
+
+            } catch (e: Exception) {
+                logger.error("Failed to process payment $paymentId", e)
+            }
         }
+
         return createdAt
     }
 }
