@@ -1,11 +1,12 @@
 package ru.quipy.payments.logic
 
+import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.launch
+import ru.quipy.common.utils.CompositeRateLimiter
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
+import kotlin.math.min
 
 data class PaymentTask(
     val paymentId: UUID,
@@ -17,13 +18,15 @@ data class PaymentTask(
     val onProcess: suspend (PaymentTask) -> Unit
 )
 
-class PaymentQueue {
+class PaymentQueue(
+    private val compositeLimiter: CompositeRateLimiter
+) {
     private val queue = LinkedBlockingQueue<PaymentTask>()
-    private val processingTasks = ConcurrentHashMap.newKeySet<UUID>()
+    private val activeTasks = ConcurrentHashMap.newKeySet<UUID>()
     private var isProcessing = false
 
     companion object {
-        val logger = LoggerFactory.getLogger(PaymentQueue::class.java)
+        private val logger = LoggerFactory.getLogger(PaymentQueue::class.java)
     }
 
     suspend fun addTask(task: PaymentTask) {
@@ -31,9 +34,8 @@ class PaymentQueue {
             task.onReject(task.paymentId, "Expired before queuing")
             return
         }
-
         queue.put(task)
-        logger.info("[${task.accountName}] Payment ${task.paymentId} added to queue, deadline: ${task.deadline}")
+        logger.info("[${task.accountName}] Payment ${task.paymentId} added to queue. QueueSize=${queue.size}, ActiveTasks=${activeTasks.size}")
     }
 
     fun startProcessing(scope: CoroutineScope, workers: Int = Runtime.getRuntime().availableProcessors()) {
@@ -50,16 +52,25 @@ class PaymentQueue {
                         continue
                     }
 
-                    if (!processingTasks.add(task.paymentId)) {
-                        logger.warn("Payment ${task.paymentId} is already being processed")
+                    // Ждем лимитов перед запуском
+                    if (!waitForLimitsWithTimeout(task)) {
+                        task.onReject(task.paymentId, "Deadline exceeded while waiting for limiter")
                         continue
                     }
 
-                    launch {
+                    if (!activeTasks.add(task.paymentId)) {
+                        logger.warn("Payment ${task.paymentId} is already active")
+                        continue
+                    }
+
+                    // Запуск задачи в отдельной корутине, чтобы worker мог брать следующую
+                    scope.launch {
                         try {
+                            logger.info("[${task.accountName}] Start processing payment=${task.paymentId} on thread=${Thread.currentThread().name}, ActiveTask=${activeTasks.size}")
                             task.onProcess(task)
                         } finally {
-                            processingTasks.remove(task.paymentId)
+                            activeTasks.remove(task.paymentId)
+                            logger.info("[${task.accountName}] Finished payment=${task.paymentId}. ActiveWorkers=${activeTasks.size}")
                         }
                     }
                 }
@@ -67,6 +78,32 @@ class PaymentQueue {
         }
     }
 
+    private suspend fun waitForLimitsWithTimeout(task: PaymentTask): Boolean {
+        var attempt = 0
+        while (now() <= task.deadline) {
+            if (compositeLimiter.tick()) return true
+
+            val remaining = task.deadline - now()
+            if (remaining <= 0) return false
+
+            val delayTime = calculateExponentialBackoff(attempt++, remaining)
+            logger.debug("[${task.accountName}] Waiting for limiter for payment=${task.paymentId}, attempt=$attempt, delay=${delayTime}ms")
+            delay(delayTime)
+        }
+        return false
+    }
+
+    private fun calculateExponentialBackoff(attempt: Int, maxWait: Long): Long {
+        val baseDelay = 50L
+        val defaultMaxDelay = 500L
+        val maxShift = 10
+        val effectiveMaxDelay = min(defaultMaxDelay, maxWait)
+        val exp = baseDelay * (1L shl min(attempt, maxShift))
+        val capped = min(exp, effectiveMaxDelay)
+        val jittered = baseDelay + (Math.random() * (capped - baseDelay)).toLong()
+        return jittered.coerceIn(10L, maxWait)
+    }
+
     fun getQueueSize() = queue.size
-    fun getProcessingCount() = processingTasks.size
+    fun getActiveCount() = activeTasks.size
 }

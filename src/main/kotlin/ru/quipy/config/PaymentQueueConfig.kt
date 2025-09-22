@@ -11,13 +11,6 @@ import ru.quipy.payments.logic.PaymentQueue
 class PaymentQueueConfig {
 
     @Bean
-    fun priorityPaymentQueue(processingScope: CoroutineScope): PaymentQueue {
-        val queue = PaymentQueue()
-        queue.startProcessing(processingScope)
-        return queue
-    }
-
-    @Bean
     fun paymentProcessingScope(): CoroutineScope {
         return CoroutineScope(Dispatchers.IO + SupervisorJob())
     }
