@@ -23,7 +23,7 @@ class PaymentExternalSystemAdapterImpl(
     private val properties: PaymentAccountProperties,
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
-    private val paymentQueue: PriorityPaymentQueue,
+    private val paymentQueue: PaymentQueue,
     private val token: String,
 ) : PaymentExternalSystemAdapter {
 
@@ -170,11 +170,19 @@ class PaymentExternalSystemAdapterImpl(
 
     private fun calculateExponentialBackoff(attempt: Int, maxWait: Long): Long {
         val baseDelay = 50L
-        val maxDelay = 1000L
-        val exponentialDelay = minOf(maxDelay, baseDelay * (1L shl minOf(attempt, 10)))
-        return minOf(exponentialDelay, maxWait).coerceAtLeast(10L)
-    }
+        val defaultMaxDelay = 500L
+        val maxShift = 10
 
+        val effectiveMaxDelay = minOf(defaultMaxDelay, maxWait)
+
+        val exponential = baseDelay * (1L shl minOf(attempt, maxShift))
+        val capped = minOf(exponential, effectiveMaxDelay)
+
+        val range = (capped - baseDelay).coerceAtLeast(0L)
+        val jittered = baseDelay + (Math.random() * range).toLong()
+
+        return jittered.coerceAtMost(maxWait).coerceAtLeast(10L)
+    }
 
 
     override fun price() = properties.price

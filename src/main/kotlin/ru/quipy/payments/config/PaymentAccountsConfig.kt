@@ -38,7 +38,7 @@ class PaymentAccountsConfig {
     @Bean
     fun accountAdapters(
         paymentService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
-        paymentQueue: PriorityPaymentQueue
+        paymentQueue: PaymentQueue
     ): List<PaymentExternalSystemAdapter> {
         val request = HttpRequest.newBuilder()
             .uri(URI("http://${paymentProviderHostPort}/external/accounts?serviceName=$serviceName&token=$token"))

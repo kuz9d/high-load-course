@@ -5,14 +5,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import ru.quipy.payments.logic.PriorityPaymentQueue
+import ru.quipy.payments.logic.PaymentQueue
 
 @Configuration
 class PaymentQueueConfig {
 
     @Bean
-    fun priorityPaymentQueue(processingScope: CoroutineScope): PriorityPaymentQueue {
-        val queue = PriorityPaymentQueue()
+    fun priorityPaymentQueue(processingScope: CoroutineScope): PaymentQueue {
+        val queue = PaymentQueue()
         queue.startProcessing(processingScope)
         return queue
     }
