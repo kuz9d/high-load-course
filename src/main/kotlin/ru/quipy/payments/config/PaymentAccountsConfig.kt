@@ -65,7 +65,6 @@ class PaymentAccountsConfig {
             .onEach(::println)
             .map {
                 PaymentExternalSystemAdapterImpl(
-                    processingScope,
                     it,
                     paymentService,
                     paymentProviderHostPort,

@@ -2,7 +2,7 @@ package ru.quipy.payments.logic
 
 import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
-import ru.quipy.common.utils.CompositeRateLimiter
+import ru.quipy.common.utils.RateLimiter
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
@@ -19,7 +19,7 @@ data class PaymentTask(
 )
 
 class PaymentQueue(
-    private val compositeLimiter: CompositeRateLimiter
+    private val compositeLimiter: RateLimiter
 ) {
     private val queue = LinkedBlockingQueue<PaymentTask>()
     private val activeTasks = ConcurrentHashMap.newKeySet<UUID>()
@@ -97,11 +97,14 @@ class PaymentQueue(
         val baseDelay = 50L
         val defaultMaxDelay = 500L
         val maxShift = 10
+        if (maxWait <= 10L) return maxOf(1L, maxWait)
         val effectiveMaxDelay = min(defaultMaxDelay, maxWait)
         val exp = baseDelay * (1L shl min(attempt, maxShift))
         val capped = min(exp, effectiveMaxDelay)
-        val jittered = baseDelay + (Math.random() * (capped - baseDelay)).toLong()
-        return jittered.coerceIn(10L, maxWait)
+        val jitterSpan = maxOf(1L, capped - baseDelay)
+        val jittered = baseDelay + (Math.random() * jitterSpan).toLong()
+        val lower = min(10L, maxWait)
+        return jittered.coerceIn(lower, maxWait)
     }
 
     fun getQueueSize() = queue.size
