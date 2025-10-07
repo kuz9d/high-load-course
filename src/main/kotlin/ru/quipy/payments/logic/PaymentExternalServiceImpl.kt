@@ -44,7 +44,7 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelLimiter = NonBlockingOngoingWindow(parallelRequests)
     private val rateLimiter = SlidingWindowRateLimiter(
         rateLimitPerSec.toLong(),
-        requestAverageProcessingTime
+        Duration.ofSeconds(1)
     )
 
     private val compositeLimiter = CompositeRateLimiter(rateLimiter, object : RateLimiter {
