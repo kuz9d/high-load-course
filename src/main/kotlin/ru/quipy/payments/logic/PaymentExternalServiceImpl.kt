@@ -2,6 +2,7 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.micrometer.core.instrument.DistributionSummary
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -12,6 +13,8 @@ import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Metrics
 import java.util.*
 
 
@@ -30,6 +33,8 @@ class PaymentExternalSystemAdapterImpl(
         val mapper = ObjectMapper().registerKotlinModule()
     }
 
+    private val meterRegistry: MeterRegistry = Metrics.globalRegistry
+
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
     private val requestAverageProcessingTime = properties.averageProcessingTime
@@ -41,11 +46,17 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
     private val ongoingWindow = OngoingWindow(parallelRequests)
 
+    private val deadlineMissCounter = io.micrometer.core.instrument.Counter
+        .builder("payments_deadline_violation_count")
+        .description("Count of payments that would miss the deadline if executed")
+        .tag("accountName", accountName)
+        .register(meterRegistry)
+
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
         val transactionId = UUID.randomUUID()
 
-        fun isDeadlineExceeded(): Boolean = now() + requestAverageProcessingTime.toMillis() > deadline
+        fun predictedFinish(): Long = now() + requestAverageProcessingTime.toMillis()
         fun markPayment(isSuccess: Boolean, reason: String) {
             paymentESService.update(paymentId) {
                 it.logProcessing(success = isSuccess, now(), transactionId, reason = reason)
@@ -56,7 +67,8 @@ class PaymentExternalSystemAdapterImpl(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
-        if (isDeadlineExceeded()) {
+        if (predictedFinish() > deadline) {
+            deadlineMissCounter.increment()
             markPayment(false, "Deadline")
             return
         }
@@ -67,7 +79,7 @@ class PaymentExternalSystemAdapterImpl(
             ongoingWindow.acquire()
             rateLimiter.tickBlocking()
 
-            if (isDeadlineExceeded()) {
+            if (predictedFinish() > deadline) {
                 markPayment(false, "Deadline")
                 ongoingWindow.release()
                 return
