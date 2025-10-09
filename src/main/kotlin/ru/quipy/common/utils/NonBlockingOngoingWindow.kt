@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class OngoingWindow(
     maxWinSize: Int,
-    fair: Boolean = false
+    fair: Boolean = true
 ) {
     private val window = Semaphore(maxWinSize, fair)
 

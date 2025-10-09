@@ -2,7 +2,6 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import kotlinx.coroutines.CoroutineScope
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -40,21 +39,25 @@ class PaymentExternalSystemAdapterImpl(
     private val client = OkHttpClient.Builder().build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
-    private val ongoingWindow = OngoingWindow(parallelRequests, fair = true)
+    private val ongoingWindow = OngoingWindow(parallelRequests)
 
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
-
         val transactionId = UUID.randomUUID()
+
+        fun isDeadlineExceeded(): Boolean = now() + requestAverageProcessingTime.toMillis() > deadline
+        fun markPayment(isSuccess: Boolean, reason: String) {
+            paymentESService.update(paymentId) {
+                it.logProcessing(success = isSuccess, now(), transactionId, reason = reason)
+            }
+        }
 
         paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
-        if (paymentEndTime() > deadline) {
-            paymentESService.update(paymentId) {
-                it.logProcessing(success = false, now(), transactionId = transactionId, reason = "Deadline")
-            }
+        if (isDeadlineExceeded()) {
+            markPayment(false, "Deadline")
             return
         }
 
@@ -64,10 +67,8 @@ class PaymentExternalSystemAdapterImpl(
             ongoingWindow.acquire()
             rateLimiter.tickBlocking()
 
-            if (paymentEndTime() > deadline) {
-                paymentESService.update(paymentId) {
-                    it.logProcessing(success = false, now(), transactionId = transactionId, reason = "Deadline")
-                }
+            if (isDeadlineExceeded()) {
+                markPayment(false, "Deadline")
                 ongoingWindow.release()
                 return
             }
@@ -77,34 +78,29 @@ class PaymentExternalSystemAdapterImpl(
                 post(emptyBody)
             }.build()
 
-                client.newCall(request).execute().use { response ->
-                    val body = try {
-                        mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                    } catch (e: Exception) {
-                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-                    }
-
-                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+            client.newCall(request).execute().use { response ->
+                val body = try {
+                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                } catch (e: Exception) {
+                    logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                    ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                 }
+
+                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
+
+                markPayment(body.result, body.message ?: "Success")
             }
 
         } catch (e: Exception) {
             when (e) {
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
-                    }
+                    markPayment(false, "Request timeout.")
                 }
+
                 else -> {
                     logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = e.message)
-                    }
+                    markPayment(false, e.message ?: "Unexpected Error")
                 }
             }
         } finally {
@@ -117,9 +113,6 @@ class PaymentExternalSystemAdapterImpl(
     override fun isEnabled() = properties.enabled
 
     override fun name() = properties.accountName
-
-    private fun paymentEndTime() = now() + requestAverageProcessingTime.toMillis()
-
 }
 
 fun now() = System.currentTimeMillis()
