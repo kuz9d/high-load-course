@@ -7,12 +7,12 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
+import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
-import java.util.concurrent.Semaphore
 import java.util.*
 
 
@@ -33,31 +33,49 @@ class PaymentExternalSystemAdapterImpl(
 
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
-    private val rateLimitPerSec = properties.rateLimitPerSec
+    private val requestAverageProcessingTime = properties.averageProcessingTime
+    private val rateLimitPerSec = properties.rateLimitPerSec.toLong()
     private val parallelRequests = properties.parallelRequests
 
     private val client = OkHttpClient.Builder().build()
 
-    private val rateLimiter = SlidingWindowRateLimiter(
-        rate = rateLimitPerSec.toLong(),
-        window = Duration.ofSeconds(1)
-    )
-    private val semaphore = Semaphore(parallelRequests)
+    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
+    private val ongoingWindow = OngoingWindow(parallelRequests, fair = true)
 
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
         val transactionId = UUID.randomUUID()
 
+        paymentESService.update(paymentId) {
+            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        }
+
+        if (paymentEndTime() > deadline) {
+            paymentESService.update(paymentId) {
+                it.logProcessing(success = false, now(), transactionId = transactionId, reason = "Deadline")
+            }
+            return
+        }
+
+        logger.info("[$accountName] Submit: $paymentId, txId: $transactionId")
+
         try {
-            semaphore.acquire()
+            ongoingWindow.acquire()
             rateLimiter.tickBlocking()
 
-            try {
-                val request = Request.Builder()
-                    .url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
-                    .post(emptyBody)
-                    .build()
+            if (paymentEndTime() > deadline) {
+                paymentESService.update(paymentId) {
+                    it.logProcessing(success = false, now(), transactionId = transactionId, reason = "Deadline")
+                }
+                ongoingWindow.release()
+                return
+            }
+
+            val request = Request.Builder().run {
+                url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
+                post(emptyBody)
+            }.build()
 
                 client.newCall(request).execute().use { response ->
                     val body = try {
@@ -69,12 +87,9 @@ class PaymentExternalSystemAdapterImpl(
 
                     logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
 
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                    }
+                paymentESService.update(paymentId) {
+                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
                 }
-            } finally {
-                semaphore.release()
             }
 
         } catch (e: Exception) {
@@ -92,6 +107,8 @@ class PaymentExternalSystemAdapterImpl(
                     }
                 }
             }
+        } finally {
+            ongoingWindow.release()
         }
     }
 
@@ -100,6 +117,8 @@ class PaymentExternalSystemAdapterImpl(
     override fun isEnabled() = properties.enabled
 
     override fun name() = properties.accountName
+
+    private fun paymentEndTime() = now() + requestAverageProcessingTime.toMillis()
 
 }
 
