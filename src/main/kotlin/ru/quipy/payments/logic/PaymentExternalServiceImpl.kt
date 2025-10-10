@@ -46,11 +46,10 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
     private val ongoingWindow = OngoingWindow(parallelRequests)
 
-    private val deadlineMissCounter = io.micrometer.core.instrument.Counter
-        .builder("payments_deadline_violation_count")
-        .description("Count of payments that would miss the deadline if executed")
-        .tag("accountName", accountName)
-        .register(meterRegistry)
+    private val deadlineViolationCounter = meterRegistry.counter(
+        "payments_deadline_violations_total",
+        "accountName", accountName
+    )
 
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
@@ -68,7 +67,7 @@ class PaymentExternalSystemAdapterImpl(
         }
 
         if (predictedFinish() > deadline) {
-            deadlineMissCounter.increment()
+            deadlineViolationCounter.increment()
             markPayment(false, "Deadline")
             return
         }
@@ -80,6 +79,7 @@ class PaymentExternalSystemAdapterImpl(
             rateLimiter.tickBlocking()
 
             if (predictedFinish() > deadline) {
+                deadlineViolationCounter.increment()
                 markPayment(false, "Deadline")
                 ongoingWindow.release()
                 return

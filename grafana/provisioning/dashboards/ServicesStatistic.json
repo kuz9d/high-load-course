@@ -1406,13 +1406,13 @@
                 "uid": "PBFA97CFB590B2093"
               },
               "editorMode": "code",
-              "expr": "sum(increase(payments_deadline_violation_count_total[1m])) by (accountName)",
+              "expr": "sum(increase(payments_deadline_violations_total[30s])) by (accountName)",
               "legendFormat": "{{accountName}}",
               "range": true,
               "refId": "A"
             }
           ],
-          "title": "Payment Deadline Violations (per minute, by account)",
+          "title": "Payment Deadline Violations (per 30 seconds)",
           "type": "timeseries"
         }
       ],
