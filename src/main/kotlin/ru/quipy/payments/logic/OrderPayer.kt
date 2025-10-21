@@ -1,9 +1,5 @@
 package ru.quipy.payments.logic
 
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -11,6 +7,7 @@ import org.springframework.stereotype.Service
 import ru.quipy.common.utils.CallerBlockingRejectedExecutionHandler
 import ru.quipy.common.utils.NamedThreadFactory
 import ru.quipy.core.EventSourcingService
+import ru.quipy.exceptions.TooManyRequestsException
 import ru.quipy.payments.api.PaymentAggregate
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
@@ -24,8 +21,6 @@ class OrderPayer {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
     }
 
-    private val paymentScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
@@ -37,28 +32,34 @@ class OrderPayer {
         16,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(8_000),
+        // 11*30-11 (rps*secondWaitTime + countParallel)
+        LinkedBlockingQueue(319),
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
 
+    private val averageProcessingTime = 1100
+    private val rps = 11
+
     suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
 
-        paymentScope.launch {
-            try {
-                val createdEvent = paymentESService.create {
-                    it.create(paymentId, orderId, amount)
-                }
-                logger.trace("Payment ${createdEvent.paymentId} created.")
-
-                paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
-
-            } catch (e: Exception) {
-                logger.error("Failed to process payment $paymentId", e)
-            }
+        if (deadline < createdAt + paymentExecutor.queue.size * averageProcessingTime / rps) {
+            throw TooManyRequestsException()
         }
 
+        paymentExecutor.submit {
+            val createdEvent = paymentESService.create {
+                it.create(
+                    paymentId,
+                    orderId,
+                    amount
+                )
+            }
+            logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
+
+            paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
+        }
         return createdAt
     }
 }
