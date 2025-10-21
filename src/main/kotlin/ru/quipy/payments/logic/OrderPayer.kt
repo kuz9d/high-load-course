@@ -17,6 +17,9 @@ import java.util.concurrent.TimeUnit
 @Service
 class OrderPayer {
 
+    private val averageProcessingTime = 1200
+    private val rps = 11
+
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
     }
@@ -37,9 +40,6 @@ class OrderPayer {
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
-
-    private val averageProcessingTime = 1100
-    private val rps = 11
 
     suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
