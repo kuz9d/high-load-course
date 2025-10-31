@@ -6,9 +6,12 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
+import ru.quipy.common.utils.LeakingBucketRateLimiter
+import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.exceptions.TooManyRequestsException
 import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.logic.OrderPayer
+import java.time.Duration
 import java.util.*
 
 @RestController
@@ -21,6 +24,9 @@ class APIController {
 
     @Autowired
     private lateinit var orderPayer: OrderPayer
+
+    // 11 * (26 - 1) = 275
+    private val leakingBucketRateLimiter = LeakingBucketRateLimiter(11, Duration.ofSeconds(1), 275)
 
     @PostMapping("/users")
     fun createUser(@RequestBody req: CreateUserRequest): User {
@@ -64,6 +70,10 @@ class APIController {
             orderRepository.save(it.copy(status = OrderStatus.PAYMENT_IN_PROGRESS))
             it
         } ?: throw IllegalArgumentException("No such order $orderId")
+
+        if (!leakingBucketRateLimiter.tick()) {
+            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build()
+        }
 
         try {
             val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
