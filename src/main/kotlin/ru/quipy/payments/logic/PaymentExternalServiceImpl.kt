@@ -15,6 +15,7 @@ import java.time.Duration
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Metrics
 import java.util.*
+import java.util.concurrent.atomic.AtomicInteger
 
 
 // Advice: always treat time as a Duration
@@ -73,49 +74,65 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId, txId: $transactionId")
 
-        try {
-            ongoingWindow.acquire()
-            rateLimiter.tickBlocking()
+        val retryCounter = 10
+        var x = 0
+        var canTry = true
 
-            if (predictedFinish() > deadline) {
-                deadlineViolationCounter.increment()
-                markPayment(false, "Deadline")
+        while (canTry) {
+            canTry = false
+            x++
+
+            try {
+                ongoingWindow.acquire()
+                rateLimiter.tickBlocking()
+
+                if (predictedFinish() > deadline) {
+                    deadlineViolationCounter.increment()
+                    markPayment(false, "Deadline")
+                    ongoingWindow.release()
+                    return
+                }
+
+                val request = Request.Builder().run {
+                    url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
+                    post(emptyBody)
+                }.build()
+
+                client.newCall(request).execute().use { response ->
+                    val body = try {
+                        mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
+                    } catch (e: Exception) {
+                        logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
+                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                    }
+
+                    if (!body.result && body.message == "Temporary error" && x < retryCounter) {
+                        canTry = true
+                        continue
+                    }
+
+                    logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
+
+                    markPayment(body.result, body.message ?: "Success")
+                }
+
+            } catch (e: Exception) {
+                when (e) {
+                    is SocketTimeoutException -> {
+                        logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
+                        markPayment(false, "Request timeout.")
+                        break
+                    }
+
+                    else -> {
+                        logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                        markPayment(false, e.message ?: "Unexpected Error")
+                        break
+                    }
+                }
+            } finally {
                 ongoingWindow.release()
-                return
             }
-
-            val request = Request.Builder().run {
-                url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
-                post(emptyBody)
-            }.build()
-
-            client.newCall(request).execute().use { response ->
-                val body = try {
-                    mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
-                } catch (e: Exception) {
-                    logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
-                    ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-                }
-
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}")
-
-                markPayment(body.result, body.message ?: "Success")
-            }
-
-        } catch (e: Exception) {
-            when (e) {
-                is SocketTimeoutException -> {
-                    logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                    markPayment(false, "Request timeout.")
-                }
-
-                else -> {
-                    logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
-                    markPayment(false, e.message ?: "Unexpected Error")
-                }
-            }
-        } finally {
-            ongoingWindow.release()
         }
     }
 
