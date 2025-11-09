@@ -14,7 +14,10 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Metrics
+import ru.quipy.exceptions.isTryRetriableException
 import java.util.*
+import java.util.concurrent.TimeUnit
+import kotlin.random.Random
 
 
 // Advice: always treat time as a Duration
@@ -40,7 +43,9 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec.toLong()
     private val parallelRequests = properties.parallelRequests
 
-    private val client = OkHttpClient.Builder().build()
+    private val client = OkHttpClient.Builder()
+        .callTimeout(2000, TimeUnit.MILLISECONDS)
+        .build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
     private val ongoingWindow = OngoingWindow(parallelRequests)
@@ -78,13 +83,13 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId, txId: $transactionId")
 
-        val retryCounterLimit = 10
-        var x = 0
+        val retryCounterLimit = 4
+        var attemptRetry = 0
         var canTry = true
 
         while (canTry) {
             canTry = false
-            x++
+            attemptRetry++
 
             try {
                 ongoingWindow.acquire()
@@ -110,7 +115,7 @@ class PaymentExternalSystemAdapterImpl(
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
 
-                    if (!body.result && body.message == "Temporary error" && x < retryCounterLimit) {
+                    if (!body.result && body.message == "Temporary error" && attemptRetry < retryCounterLimit) {
                         retryCounter.increment()
                         canTry = true
                         continue
@@ -121,12 +126,24 @@ class PaymentExternalSystemAdapterImpl(
                     markPayment(body.result, body.message ?: "Success")
                 }
 
-            } catch (e: Exception) {
-                when (e) {
-                    is SocketTimeoutException -> {
+            } catch (e: java.lang.Exception) {
+                when {
+                    e is SocketTimeoutException -> {
                         logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
                         markPayment(false, "Request timeout.")
                         break
+                    }
+
+                    isTryRetriableException(e) -> {
+                        if (attemptRetry < retryCounterLimit && predictedFinish() < deadline ) {
+                            retryCounter.increment()
+                            attemptRetry++
+                            continue
+                        }
+                        deadlineViolationCounter.increment()
+                        markPayment(false, "Deadline")
+                        ongoingWindow.release()
+                        return
                     }
 
                     else -> {

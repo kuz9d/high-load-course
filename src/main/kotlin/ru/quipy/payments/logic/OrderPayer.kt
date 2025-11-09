@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit
 @Service
 class OrderPayer {
 
-    private val averageProcessingTime = 1200
+    private val averageProcessingTime = 1200 //fix ??
     private val rps = 11
 
     companion object {
