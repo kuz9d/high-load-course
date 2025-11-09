@@ -15,7 +15,6 @@ import java.time.Duration
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Metrics
 import java.util.*
-import java.util.concurrent.atomic.AtomicInteger
 
 
 // Advice: always treat time as a Duration
@@ -51,6 +50,11 @@ class PaymentExternalSystemAdapterImpl(
         "accountName", accountName
     )
 
+    private val retryCounter = meterRegistry.counter(
+        "http_request_retries_total",
+        "accountName", accountName
+    )
+
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
         val transactionId = UUID.randomUUID()
@@ -74,7 +78,7 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId, txId: $transactionId")
 
-        val retryCounter = 10
+        val retryCounterLimit = 10
         var x = 0
         var canTry = true
 
@@ -106,7 +110,8 @@ class PaymentExternalSystemAdapterImpl(
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
 
-                    if (!body.result && body.message == "Temporary error" && x < retryCounter) {
+                    if (!body.result && body.message == "Temporary error" && x < retryCounterLimit) {
+                        retryCounter.increment()
                         canTry = true
                         continue
                     }
