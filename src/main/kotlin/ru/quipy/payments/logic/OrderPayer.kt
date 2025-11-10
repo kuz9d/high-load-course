@@ -17,9 +17,6 @@ import java.util.concurrent.TimeUnit
 @Service
 class OrderPayer {
 
-    private val averageProcessingTime = 1200 //fix ??
-    private val rps = 11
-
     companion object {
         val logger: Logger = LoggerFactory.getLogger(OrderPayer::class.java)
     }
@@ -35,18 +32,13 @@ class OrderPayer {
         16,
         0L,
         TimeUnit.MILLISECONDS,
-        // 11*30-11 (rps*secondWaitTime + countParallel)
-        LinkedBlockingQueue(319),
+        LinkedBlockingQueue(8_000),
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
 
     suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
-
-        if (deadline < createdAt + paymentExecutor.queue.size * averageProcessingTime / rps) {
-            throw TooManyRequestsException()
-        }
 
         paymentExecutor.submit {
             val createdEvent = paymentESService.create {

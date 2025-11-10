@@ -17,7 +17,6 @@ import io.micrometer.core.instrument.Metrics
 import ru.quipy.exceptions.isTryRetriableException
 import java.util.*
 import java.util.concurrent.TimeUnit
-import kotlin.random.Random
 
 
 // Advice: always treat time as a Duration
@@ -44,7 +43,7 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
 
     private val client = OkHttpClient.Builder()
-        .callTimeout(2000, TimeUnit.MILLISECONDS)
+        .callTimeout(1500, TimeUnit.MILLISECONDS)
         .build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
@@ -143,7 +142,7 @@ class PaymentExternalSystemAdapterImpl(
                         deadlineViolationCounter.increment()
                         markPayment(false, "Deadline")
                         ongoingWindow.release()
-                        return
+                        break
                     }
 
                     else -> {
