@@ -2235,7 +2235,7 @@
               "refId": "D"
             }
           ],
-          "title": "Payment request duration (p50 / p80 / p90)",
+          "title": "Payment request duration (p50 / p80 / p90 / p99)",
           "type": "timeseries"
         },
         {
