@@ -10,13 +10,13 @@ import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
-import java.net.SocketTimeoutException
-import java.time.Duration
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Metrics
 import ru.quipy.exceptions.isTryRetriableException
 import java.util.*
 import java.util.concurrent.TimeUnit
+import io.micrometer.core.instrument.Timer
+import java.time.Duration
 
 
 // Advice: always treat time as a Duration
@@ -58,6 +58,13 @@ class PaymentExternalSystemAdapterImpl(
         "http_request_retries_total",
         "accountName", accountName
     )
+
+    private val requestDurationTimer: Timer = Timer.builder("payment_request_duration_seconds")
+        .description("Duration of external payment requests")
+        .publishPercentiles(0.5, 0.8, 0.9)
+        .publishPercentileHistogram()
+        .tag("accountName", accountName)
+        .register(meterRegistry)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
@@ -106,7 +113,11 @@ class PaymentExternalSystemAdapterImpl(
                     post(emptyBody)
                 }.build()
 
+                val start = System.nanoTime()
                 client.newCall(request).execute().use { response ->
+                    val elapsed = System.nanoTime() - start
+                    requestDurationTimer.record(elapsed, TimeUnit.NANOSECONDS)
+
                     val body = try {
                         mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                     } catch (e: Exception) {
@@ -127,12 +138,6 @@ class PaymentExternalSystemAdapterImpl(
 
             } catch (e: java.lang.Exception) {
                 when {
-                    e is SocketTimeoutException -> {
-                        logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                        markPayment(false, "Request timeout.")
-                        break
-                    }
-
                     isTryRetriableException(e) -> {
                         if (attemptRetry < retryCounterLimit && predictedFinish() < deadline ) {
                             retryCounter.increment()
