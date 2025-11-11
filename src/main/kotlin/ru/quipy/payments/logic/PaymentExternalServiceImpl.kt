@@ -2,6 +2,9 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Metrics
+import io.micrometer.core.instrument.Timer
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -9,14 +12,11 @@ import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
+import ru.quipy.exceptions.isTryRetriableException
 import ru.quipy.payments.api.PaymentAggregate
-import java.net.SocketTimeoutException
 import java.time.Duration
-import io.micrometer.core.instrument.MeterRegistry
-import io.micrometer.core.instrument.Metrics
 import java.util.*
-import java.util.concurrent.atomic.AtomicInteger
-
+import java.util.concurrent.TimeUnit
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -28,7 +28,6 @@ class PaymentExternalSystemAdapterImpl(
 
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
-
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
     }
@@ -41,7 +40,9 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec.toLong()
     private val parallelRequests = properties.parallelRequests
 
-    private val client = OkHttpClient.Builder().build()
+    private val client = OkHttpClient.Builder()
+        .callTimeout(1000, TimeUnit.MILLISECONDS)
+        .build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
     private val ongoingWindow = OngoingWindow(parallelRequests)
@@ -50,6 +51,18 @@ class PaymentExternalSystemAdapterImpl(
         "payments_deadline_violations_total",
         "accountName", accountName
     )
+
+    private val retryCounter = meterRegistry.counter(
+        "http_request_retries_total",
+        "accountName", accountName
+    )
+
+    private val requestDurationTimer: Timer = Timer.builder("payment_request_duration_seconds")
+        .description("Duration of external payment requests")
+        .publishPercentiles(0.5, 0.8, 0.9, 0.99)
+        .publishPercentileHistogram()
+        .tag("accountName", accountName)
+        .register(meterRegistry)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
@@ -74,13 +87,13 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId, txId: $transactionId")
 
-        val retryCounter = 10
-        var x = 0
+        val retryCounterLimit = 4
+        var attemptRetry = 0
         var canTry = true
 
         while (canTry) {
             canTry = false
-            x++
+            attemptRetry++
 
             try {
                 ongoingWindow.acquire()
@@ -98,7 +111,11 @@ class PaymentExternalSystemAdapterImpl(
                     post(emptyBody)
                 }.build()
 
+                val start = System.nanoTime()
                 client.newCall(request).execute().use { response ->
+                    val elapsed = System.nanoTime() - start
+                    requestDurationTimer.record(elapsed, TimeUnit.NANOSECONDS)
+
                     val body = try {
                         mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                     } catch (e: Exception) {
@@ -106,7 +123,8 @@ class PaymentExternalSystemAdapterImpl(
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
 
-                    if (!body.result && body.message == "Temporary error" && x < retryCounter) {
+                    if (!body.result && body.message == "Temporary error" && attemptRetry < retryCounterLimit) {
+                        retryCounter.increment()
                         canTry = true
                         continue
                     }
@@ -116,11 +134,17 @@ class PaymentExternalSystemAdapterImpl(
                     markPayment(body.result, body.message ?: "Success")
                 }
 
-            } catch (e: Exception) {
-                when (e) {
-                    is SocketTimeoutException -> {
-                        logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
-                        markPayment(false, "Request timeout.")
+            } catch (e: java.lang.Exception) {
+                when {
+                    isTryRetriableException(e) -> {
+                        if (attemptRetry < retryCounterLimit && predictedFinish() < deadline) {
+                            retryCounter.increment()
+                            canTry = true
+                            continue
+                        }
+                        deadlineViolationCounter.increment()
+                        markPayment(false, "Deadline")
+                        ongoingWindow.release()
                         break
                     }
 
