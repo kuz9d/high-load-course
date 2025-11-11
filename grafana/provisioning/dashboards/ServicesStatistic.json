@@ -2220,6 +2220,19 @@
               "legendFormat": "p90 - {{accountName}}",
               "range": true,
               "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "PBFA97CFB590B2093"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum(rate(payment_request_duration_seconds_bucket{service=~\"$service\"}[30s])) by (le, accountName))",
+              "hide": false,
+              "instant": false,
+              "legendFormat": "p99 - {{accountName}}",
+              "range": true,
+              "refId": "D"
             }
           ],
           "title": "Payment request duration (p50 / p80 / p90)",

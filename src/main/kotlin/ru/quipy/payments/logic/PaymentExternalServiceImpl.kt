@@ -61,7 +61,7 @@ class PaymentExternalSystemAdapterImpl(
 
     private val requestDurationTimer: Timer = Timer.builder("payment_request_duration_seconds")
         .description("Duration of external payment requests")
-        .publishPercentiles(0.5, 0.8, 0.9)
+        .publishPercentiles(0.5, 0.8, 0.9, 0.99)
         .publishPercentileHistogram()
         .tag("accountName", accountName)
         .register(meterRegistry)
