@@ -2,6 +2,9 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Metrics
+import io.micrometer.core.instrument.Timer
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -9,15 +12,11 @@ import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
-import ru.quipy.payments.api.PaymentAggregate
-import io.micrometer.core.instrument.MeterRegistry
-import io.micrometer.core.instrument.Metrics
 import ru.quipy.exceptions.isTryRetriableException
+import ru.quipy.payments.api.PaymentAggregate
+import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
-import io.micrometer.core.instrument.Timer
-import java.time.Duration
-
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -29,7 +28,6 @@ class PaymentExternalSystemAdapterImpl(
 
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
-
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
     }
@@ -43,7 +41,7 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
 
     private val client = OkHttpClient.Builder()
-        .callTimeout(1500, TimeUnit.MILLISECONDS)
+        .callTimeout(1000, TimeUnit.MILLISECONDS)
         .build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec, Duration.ofSeconds(1))
@@ -139,9 +137,9 @@ class PaymentExternalSystemAdapterImpl(
             } catch (e: java.lang.Exception) {
                 when {
                     isTryRetriableException(e) -> {
-                        if (attemptRetry < retryCounterLimit && predictedFinish() < deadline ) {
+                        if (attemptRetry < retryCounterLimit && predictedFinish() < deadline) {
                             retryCounter.increment()
-                            attemptRetry++
+                            canTry = true
                             continue
                         }
                         deadlineViolationCounter.increment()
