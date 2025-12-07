@@ -6,9 +6,11 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 import ru.quipy.common.utils.CallerBlockingRejectedExecutionHandler
 import ru.quipy.common.utils.NamedThreadFactory
+import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.exceptions.TooManyRequestsException
 import ru.quipy.payments.api.PaymentAggregate
+import java.time.Duration
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
@@ -27,18 +29,25 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
+    private val queue = LinkedBlockingQueue<Runnable>(8_000)
     private val paymentExecutor = ThreadPoolExecutor(
-        50,
-        50,
-        0L,
-        TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(8_000),
+        // 1000/(1/10)/50=200
+        200,
+        1100,
+        60L, TimeUnit.SECONDS,
+        queue,
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
 
+    private val slidingWindowRateLimiter = SlidingWindowRateLimiter(1100, Duration.ofSeconds(1))
+
     suspend fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
+        val toBlock = deadline - createdAt
+        if (!slidingWindowRateLimiter.tickBlocking(Duration.ofMillis(toBlock))) {
+            throw TooManyRequestsException()
+        }
 
         paymentExecutor.submit {
             val createdEvent = paymentESService.create {
