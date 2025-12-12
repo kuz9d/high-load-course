@@ -6,11 +6,9 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
-import ru.quipy.common.utils.LeakingBucketRateLimiter
 import ru.quipy.exceptions.TooManyRequestsException
 import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.logic.OrderPayer
-import java.time.Duration
 import java.util.*
 
 @RestController
@@ -20,9 +18,6 @@ class APIController {
 
     @Autowired
     private lateinit var orderRepository: OrderRepository
-
-    private val leakingBucketRateLimiter = LeakingBucketRateLimiter(8, Duration.ofSeconds(1), 24)
-
     @Autowired
     private lateinit var orderPayer: OrderPayer
 
@@ -64,21 +59,18 @@ class APIController {
     @PostMapping("/orders/{orderId}/payment")
     suspend fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): ResponseEntity<PaymentSubmissionDto> {
         val paymentId = UUID.randomUUID()
+        logger.info("Start of payOrder()")
         val order = orderRepository.findById(orderId)?.let {
             orderRepository.save(it.copy(status = OrderStatus.PAYMENT_IN_PROGRESS))
             it
         } ?: throw IllegalArgumentException("No such order $orderId")
 
-        if (!leakingBucketRateLimiter.tick()) {
-            return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS).build()
-        }
-
         try {
             val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
             return ResponseEntity.ok(PaymentSubmissionDto(createdAt, paymentId))
-        } catch (e: TooManyRequestsException) {
-            logger.warn("Payment order $orderId has too many requests.")
+        } catch (ex: TooManyRequestsException) {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header("Retry-After", 1.toString())
                 .build()
         }
     }

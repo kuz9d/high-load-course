@@ -1,21 +1,21 @@
 package ru.quipy.common.utils
 
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class OngoingWindow(
     maxWinSize: Int,
-    fair: Boolean = true
 ) {
-    private val window = Semaphore(maxWinSize, fair)
-
-    fun acquire() {
-        window.acquire()
-    }
+    private val window = Semaphore(maxWinSize)
 
     fun release() = window.release()
 
     fun awaitingQueueSize() = window.queueLength
+
+    fun tryAcquire(timeToBlock: Long, timeUnit: TimeUnit): Boolean {
+        return window.tryAcquire(timeToBlock, timeUnit)
+    }
 }
 
 class NonBlockingOngoingWindow(
