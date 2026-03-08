@@ -6,7 +6,6 @@ import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Metrics
 import io.micrometer.core.instrument.Timer
-import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -18,6 +17,7 @@ import java.net.http.HttpResponse
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlin.math.pow
@@ -37,7 +37,8 @@ class PaymentExternalSystemAdapterImpl(
 
     private val meterRegistry: MeterRegistry = Metrics.globalRegistry
 
-    private val ongoingWindow = OngoingWindow(properties.parallelRequests)
+    private val scheduler = Executors.newScheduledThreadPool(100)
+    private val semaphore = Semaphore(properties.parallelRequests)
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
 
@@ -64,16 +65,16 @@ class PaymentExternalSystemAdapterImpl(
         .register(meterRegistry)
 
     private val requestAverageProcessingTime = properties.averageProcessingTime
-    private val maxAttempts = 10
-    private val maxDelayMs = 20000L
-    private val delayBaseMs = 500L
+    private val maxAttempts = 3
+    private val maxDelayMs = 1000L
+    private val delayBaseMs = 50L
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
         val transactionId = UUID.randomUUID()
-        paymentESService.update(paymentId) {
-            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-        }
+//        paymentESService.update(paymentId) {
+//            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+//        }
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
         performRequestWithRetry(paymentId, amount, transactionId, paymentStartedAt, deadline, 1)
@@ -88,9 +89,9 @@ class PaymentExternalSystemAdapterImpl(
         attempt: Int
     ) {
         fun markPayment(isSuccess: Boolean, reason: String?) {
-            paymentESService.update(paymentId) {
-                it.logProcessing(success = isSuccess, now(), transactionId, reason = reason)
-            }
+//            paymentESService.update(paymentId) {
+//                it.logProcessing(success = isSuccess, now(), transactionId, reason = reason)
+//            }
         }
 
         if (now() + requestAverageProcessingTime.toMillis() > deadline || attempt > maxAttempts) {
@@ -104,15 +105,16 @@ class PaymentExternalSystemAdapterImpl(
         }
 
         val timeToBlock = deadline - System.currentTimeMillis()
-        val acquired = ongoingWindow.tryAcquire(timeToBlock, TimeUnit.MILLISECONDS)
+        val acquired = semaphore.tryAcquire(timeToBlock, TimeUnit.MILLISECONDS)
         if (!acquired) {
             logger.warn("[$accountName] Timeout acquiring semaphore for payment $paymentId")
-            markPayment(false, "Semaphore will not be acquired")
+            markPayment(false, "Semaphore timeout")
             return
         }
 
         val request = HttpRequest.newBuilder()
             .uri(URI("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"))
+            .timeout(Duration.ofMillis(150))
             .POST(HttpRequest.BodyPublishers.noBody())
             .build()
 
@@ -133,17 +135,19 @@ class PaymentExternalSystemAdapterImpl(
             markPayment(body.result, body.message)
 
             if (body.result) {
-                ongoingWindow.release()
+                semaphore.release()
             } else {
-                ongoingWindow.release()
-                retry(paymentId, amount, transactionId, paymentStartedAt, deadline, attempt)
+                if (attempt > 1) {
+                    retryCounter.increment()
+                }
+                semaphore.release()
+                scheduleRetry(paymentId, amount, transactionId, paymentStartedAt, deadline, attempt)
             }
         }.exceptionally { ex ->
-            ongoingWindow.release()
             when (ex) {
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", ex)
-                    markPayment(false, "Payment request timeout")
+                    markPayment(false, "Request timeout.")
                 }
 
                 else -> {
@@ -151,19 +155,29 @@ class PaymentExternalSystemAdapterImpl(
                     markPayment(false, ex.message)
                 }
             }
-            retry(paymentId, amount, transactionId, paymentStartedAt, deadline, attempt)
+            if (attempt > 1) {
+                retryCounter.increment()
+            }
+            semaphore.release()
+            scheduleRetry(paymentId, amount, transactionId, paymentStartedAt, deadline, attempt)
         }
     }
 
-    private fun retry(paymentId: UUID, amount: Int, transactionId: UUID, paymentStartedAt: Long, deadline: Long, attempt: Int) {
-        retryCounter.increment()
-
+    private fun scheduleRetry(
+        paymentId: UUID,
+        amount: Int,
+        transactionId: UUID,
+        paymentStartedAt: Long,
+        deadline: Long,
+        attempt: Int
+    ) {
         val currentDelay = backoffDelay(attempt)
         val remainingTime = deadline - now()
         val sleepTime = min(currentDelay, remainingTime - 50)
         if (sleepTime > 0) {
-            Thread.sleep(sleepTime)
-            performRequestWithRetry(paymentId, amount, transactionId, paymentStartedAt, deadline, attempt + 1)
+            scheduler.schedule({
+                performRequestWithRetry(paymentId, amount, transactionId, paymentStartedAt, deadline, attempt + 1)
+            }, sleepTime, TimeUnit.MILLISECONDS)
         }
     }
 
