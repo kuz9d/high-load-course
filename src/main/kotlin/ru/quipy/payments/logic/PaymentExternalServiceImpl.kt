@@ -16,11 +16,10 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import kotlin.math.min
-import kotlin.math.pow
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -64,41 +63,32 @@ class PaymentExternalSystemAdapterImpl(
         .tag("accountName", accountName)
         .register(meterRegistry)
 
-    private val requestAverageProcessingTime = properties.averageProcessingTime
-    private val maxAttempts = 3
-    private val maxDelayMs = 1000L
-    private val delayBaseMs = 50L
+    private val hedgeDelayMs = 165L
+    private val hedgeCount = 4
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
         val transactionId = UUID.randomUUID()
-//        paymentESService.update(paymentId) {
-//            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
-//        }
+        paymentESService.update(paymentId) {
+            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        }
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
-        performRequestWithRetry(paymentId, amount, transactionId, paymentStartedAt, deadline, 1)
+        performPaymentWithHedge(paymentId, amount, transactionId, paymentStartedAt, deadline)
     }
 
-    private fun performRequestWithRetry(
+    private fun performPaymentWithHedge(
         paymentId: UUID,
         amount: Int,
         transactionId: UUID,
         paymentStartedAt: Long,
-        deadline: Long,
-        attempt: Int
+        deadline: Long
     ) {
         fun markPayment(isSuccess: Boolean, reason: String?) {
-//            paymentESService.update(paymentId) {
-//                it.logProcessing(success = isSuccess, now(), transactionId, reason = reason)
-//            }
+            paymentESService.update(paymentId) {
+                it.logProcessing(success = isSuccess, now(), transactionId, reason = reason)
+            }
         }
-
-        if (now() + requestAverageProcessingTime.toMillis() > deadline || attempt > maxAttempts) {
-            markPayment(false, "Max attempts reached or deadline exceeded")
-            return
-        }
-
         if (!slidingWindowRateLimiter.tickBlocking(Duration.ofMillis(deadline - now()))) {
             markPayment(false, "Sliding window exceeded maximum attempts reached")
             return
@@ -114,14 +104,33 @@ class PaymentExternalSystemAdapterImpl(
 
         val request = HttpRequest.newBuilder()
             .uri(URI("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"))
-            .timeout(Duration.ofMillis(150))
+            .header("x-idempotency-key", transactionId.toString())
+            .timeout(Duration.ofMillis(1600))
             .POST(HttpRequest.BodyPublishers.noBody())
             .build()
 
         val start = now()
-        http2Client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).thenApply { response ->
-            val elapsed = System.nanoTime() - start
-            requestDurationTimer.record(elapsed, TimeUnit.NANOSECONDS)
+
+        val result = CompletableFuture<HttpResponse<String>>()
+
+        http2Client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+            .thenAccept { result.complete(it) }
+            .exceptionally { ex -> result.completeExceptionally(ex); null }
+
+        for (i in 1..hedgeCount) {
+            scheduler.schedule({
+                if (result.isDone) return@schedule
+                logger.info("[$accountName] Hedge #$i fired for payment $paymentId, txId: $transactionId")
+                retryCounter.increment()
+                http2Client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                    .thenAccept { result.complete(it) }
+                    .exceptionally { ex -> result.completeExceptionally(ex); null }
+            }, hedgeDelayMs * i, TimeUnit.MILLISECONDS)
+        }
+
+        result.thenApply { response ->
+            val elapsed = now() - start
+            requestDurationTimer.record(elapsed, TimeUnit.MILLISECONDS)
 
             val body = try {
                 mapper.readValue(response.body(), ExternalSysResponse::class.java)
@@ -134,55 +143,21 @@ class PaymentExternalSystemAdapterImpl(
 
             markPayment(body.result, body.message)
 
-            if (body.result) {
-                semaphore.release()
-            } else {
-                if (attempt > 1) {
-                    retryCounter.increment()
-                }
-                semaphore.release()
-                scheduleRetry(paymentId, amount, transactionId, paymentStartedAt, deadline, attempt)
-            }
+            semaphore.release()
         }.exceptionally { ex ->
             when (ex) {
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", ex)
                     markPayment(false, "Request timeout.")
                 }
-
                 else -> {
                     logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", ex)
                     markPayment(false, ex.message)
                 }
             }
-            if (attempt > 1) {
-                retryCounter.increment()
-            }
+            requestDurationTimer.record(now() - start, TimeUnit.MILLISECONDS)
             semaphore.release()
-            scheduleRetry(paymentId, amount, transactionId, paymentStartedAt, deadline, attempt)
         }
-    }
-
-    private fun scheduleRetry(
-        paymentId: UUID,
-        amount: Int,
-        transactionId: UUID,
-        paymentStartedAt: Long,
-        deadline: Long,
-        attempt: Int
-    ) {
-        val currentDelay = backoffDelay(attempt)
-        val remainingTime = deadline - now()
-        val sleepTime = min(currentDelay, remainingTime - 50)
-        if (sleepTime > 0) {
-            scheduler.schedule({
-                performRequestWithRetry(paymentId, amount, transactionId, paymentStartedAt, deadline, attempt + 1)
-            }, sleepTime, TimeUnit.MILLISECONDS)
-        }
-    }
-
-    private fun backoffDelay(attempt: Int): Long {
-        return minOf((delayBaseMs * 2.0.pow((attempt - 1).toDouble())).toLong(), maxDelayMs)
     }
 
     override fun price() = properties.price
