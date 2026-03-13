@@ -6,6 +6,9 @@ import org.slf4j.LoggerFactory
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Metrics
 import io.micrometer.core.instrument.Timer
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException
+import io.github.resilience4j.circuitbreaker.CircuitBreaker
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -17,9 +20,11 @@ import java.net.http.HttpResponse
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionStage
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -64,7 +69,18 @@ class PaymentExternalSystemAdapterImpl(
         .register(meterRegistry)
 
     private val hedgeDelayMs = 165L
-    private val hedgeCount = 4
+    private val hedgeCount = 3
+
+    private val circuitBreakerConfig = CircuitBreakerConfig.custom()
+        .failureRateThreshold(50f)
+        .waitDurationInOpenState(Duration.ofSeconds(25))
+        .permittedNumberOfCallsInHalfOpenState(3)
+        .minimumNumberOfCalls(15)
+        .slidingWindowSize(100)
+        .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+        .build()
+
+    val circuitBreaker: CircuitBreaker = CircuitBreaker.of("payment-service-$accountName", circuitBreakerConfig)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
@@ -112,19 +128,61 @@ class PaymentExternalSystemAdapterImpl(
         val start = now()
 
         val result = CompletableFuture<HttpResponse<String>>()
+        val failuresRemaining = AtomicInteger(hedgeCount + 1)
 
-        http2Client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-            .thenAccept { result.complete(it) }
-            .exceptionally { ex -> result.completeExceptionally(ex); null }
+        val decorated = CircuitBreaker.decorateCompletionStage(circuitBreaker) {
+            http2Client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+        }
+
+        val protectedStage: CompletionStage<HttpResponse<String>> = decorated.get()
+
+        protectedStage.whenCompleteAsync({ r, t ->
+            if (result.isDone) return@whenCompleteAsync
+
+            if (t != null) {
+                if (t is CallNotPermittedException) {
+                    logger.warn("[$accountName] Circuit OPEN -> txId=$transactionId payment=$paymentId skipped")
+                } else {
+                    logger.debug("[$accountName] error txId=$transactionId", t)
+                }
+
+                if (failuresRemaining.decrementAndGet() == 0 && !result.isDone) {
+                    result.completeExceptionally(t)
+                }
+            } else {
+                result.complete(r)
+            }
+        }, scheduler)
 
         for (i in 1..hedgeCount) {
             scheduler.schedule({
                 if (result.isDone) return@schedule
                 logger.info("[$accountName] Hedge #$i fired for payment $paymentId, txId: $transactionId")
                 retryCounter.increment()
-                http2Client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                    .thenAccept { result.complete(it) }
-                    .exceptionally { ex -> result.completeExceptionally(ex); null }
+
+                val hedgeDecorated = CircuitBreaker.decorateCompletionStage(circuitBreaker) {
+                    http2Client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                }
+
+                val hedgeProtectedStage: CompletionStage<HttpResponse<String>> = hedgeDecorated.get()
+
+                hedgeProtectedStage.whenCompleteAsync({ r, t ->
+                    if (result.isDone) return@whenCompleteAsync
+
+                    if (t != null) {
+                        if (t is CallNotPermittedException) {
+                            logger.warn("[$accountName] Circuit OPEN -> txId=$transactionId payment=$paymentId hedge #$i skipped")
+                        } else {
+                            logger.debug("[$accountName] Hedge #$i error txId=$transactionId", t)
+                        }
+
+                        if (failuresRemaining.decrementAndGet() == 0 && !result.isDone) {
+                            result.completeExceptionally(t)
+                        }
+                    } else {
+                        result.complete(r)
+                    }
+                }, scheduler)
             }, hedgeDelayMs * i, TimeUnit.MILLISECONDS)
         }
 
@@ -146,6 +204,10 @@ class PaymentExternalSystemAdapterImpl(
             semaphore.release()
         }.exceptionally { ex ->
             when (ex) {
+                is CallNotPermittedException -> {
+                    logger.error("[$accountName] Circuit breaker OPEN for txId: $transactionId, payment: $paymentId", ex)
+                    markPayment(false, "Circuit breaker is open - service unavailable")
+                }
                 is SocketTimeoutException -> {
                     logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", ex)
                     markPayment(false, "Request timeout.")
